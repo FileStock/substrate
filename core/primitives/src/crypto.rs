@@ -203,6 +203,14 @@ pub enum PublicError {
 #[cfg(feature = "std")]
 pub trait Ss58Codec: Sized {
 	/// Some if the string is a properly encoded SS58Check address.
+	fn from_ss58check_testnet(s: &str) -> Result<Self, PublicError>;
+	/// Some if the string is a properly encoded SS58Check address, optionally with
+	/// a derivation path following.
+	fn from_string_testnet(s: &str) -> Result<Self, PublicError> { Self::from_ss58check(s) }
+	/// Return the ss58-check string for this key.
+	fn to_ss58check_testnet(&self) -> String;
+
+	/// Some if the string is a properly encoded SS58Check address.
 	fn from_ss58check(s: &str) -> Result<Self, PublicError>;
 	/// Some if the string is a properly encoded SS58Check address, optionally with
 	/// a derivation path following.
@@ -235,7 +243,7 @@ fn ss58hash(data: &[u8]) -> blake2_rfc::blake2b::Blake2bResult {
 
 #[cfg(feature = "std")]
 impl<T: AsMut<[u8]> + AsRef<[u8]> + Default + Derive> Ss58Codec for T {
-	fn from_ss58check(s: &str) -> Result<Self, PublicError> {
+	fn from_ss58check_testnet(s: &str) -> Result<Self, PublicError> {
 		let mut res = T::default();
 		let len = res.as_mut().len();
 		let d = s.from_base58().map_err(|_| PublicError::BadBase58)?; // failure here would be invalid encoding.
@@ -257,9 +265,61 @@ impl<T: AsMut<[u8]> + AsRef<[u8]> + Default + Derive> Ss58Codec for T {
 		Ok(res)
 	}
 
-	fn to_ss58check(&self) -> String {
+	fn to_ss58check_testnet(&self) -> String {
 		// let mut v = vec![42u8];
 		let mut v = vec![44u8];
+		v.extend(self.as_ref());
+		let r = ss58hash(&v);
+		v.extend(&r.as_bytes()[0..2]);
+		v.to_base58()
+	}
+
+	fn from_string_testnet(s: &str) -> Result<Self, PublicError> {
+		let re = Regex::new(r"^(?P<ss58>[\w\d]+)?(?P<path>(//?[^/]+)*)$")
+			.expect("constructed from known-good static value; qed");
+		let cap = re.captures(s).ok_or(PublicError::InvalidFormat)?;
+		let re_junction = Regex::new(r"/(/?[^/]+)")
+			.expect("constructed from known-good static value; qed");
+		let addr = Self::from_ss58check_testnet(
+			cap.name("ss58")
+				.map(|r| r.as_str())
+				.unwrap_or(DEV_ADDRESS)
+		)?;
+		if cap["path"].is_empty() {
+			Ok(addr)
+		} else {
+			let path = re_junction.captures_iter(&cap["path"])
+				.map(|f| DeriveJunction::from(&f[1]));
+			addr.derive(path)
+				.ok_or(PublicError::InvalidPath)
+		}
+	}
+
+	fn from_ss58check(s: &str) -> Result<Self, PublicError> {
+		let mut res = T::default();
+		let len = res.as_mut().len();
+		let d = s.from_base58().map_err(|_| PublicError::BadBase58)?; // failure here would be invalid encoding.
+		if d.len() != len + 3 {
+			// Invalid length.
+			return Err(PublicError::BadLength);
+		}
+		// if d[0] != 42 {
+		if d[0] != 46 {
+			// Invalid version.
+			return Err(PublicError::UnknownVersion);
+		}
+
+		if d[len+1..len+3] != ss58hash(&d[0..len+1]).as_bytes()[0..2] {
+			// Invalid checksum.
+			return Err(PublicError::InvalidChecksum);
+		}
+		res.as_mut().copy_from_slice(&d[1..len+1]);
+		Ok(res)
+	}
+
+	fn to_ss58check(&self) -> String {
+		// let mut v = vec![42u8];
+		let mut v = vec![46u8];
 		v.extend(self.as_ref());
 		let r = ss58hash(&v);
 		v.extend(&r.as_bytes()[0..2]);
